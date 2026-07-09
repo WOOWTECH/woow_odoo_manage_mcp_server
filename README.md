@@ -1,0 +1,1 @@
+# woow_odoo_manage_mcp_server
