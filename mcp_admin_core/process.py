@@ -1,0 +1,211 @@
+"""MCP server subprocess manager.
+
+Starts, stops, and monitors the MCP server process.  The command,
+args, and environment are read from the config store's
+``mcp_server`` section.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import signal
+import subprocess
+from pathlib import Path
+from typing import Any
+
+from .config import get_config_store
+
+logger = logging.getLogger(__name__)
+
+# Patch scripts applied before MCP server starts
+_PATCHES_DIR = Path(__file__).resolve().parent.parent / "patches"
+_PATCH_TOKEN_STORE = _PATCHES_DIR / "fix_cross_session_token_store.py"
+_PATCH_DIRECT_WRITES = _PATCHES_DIR / "fix_direct_writes.py"
+
+
+class McpProcessManager:
+    """Manage the MCP server as an asyncio subprocess."""
+
+    def __init__(self) -> None:
+        self._process: asyncio.subprocess.Process | None = None
+        self._running = False
+        self._restart_count = 0
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def start(self) -> bool:
+        """Start the MCP server subprocess.  Returns True if started."""
+        if self._running and self._process and self._process.returncode is None:
+            logger.info("MCP server already running (pid=%s)", self._process.pid)
+            return True
+
+        store = get_config_store()
+        mcp_cfg = await store.get("mcp_server", {})
+        command = mcp_cfg.get("command", "")
+
+        if not command:
+            logger.warning("No MCP server command configured — skipping start")
+            return False
+
+        args = mcp_cfg.get("args", [])
+        env_overrides = mcp_cfg.get("env", {})
+
+        # Build connection env from config
+        connection = await store.get("connection", {})
+
+        # Merge: OS env + connection config + mcp_server.env overrides
+        env = {**os.environ}
+        for key, value in connection.items():
+            env[key.upper()] = str(value)
+        for key, value in env_overrides.items():
+            env[key] = str(value)
+
+        # Apply patches before starting
+        self._run_patch(_PATCH_TOKEN_STORE, "token-store")
+        self._run_patch(_PATCH_DIRECT_WRITES, "direct-writes")
+
+        cmd = [command] + args
+        logger.info("Starting MCP server: %s", " ".join(cmd))
+
+        try:
+            self._process = await asyncio.create_subprocess_exec(
+                *cmd,
+                env=env,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            self._running = True
+            logger.info("MCP server started (pid=%s)", self._process.pid)
+
+            # Start log drainer in background
+            asyncio.create_task(self._drain_logs())
+            return True
+
+        except FileNotFoundError:
+            logger.error("MCP server command not found: %s", command)
+            self._running = False
+            return False
+        except Exception as exc:
+            logger.error("Failed to start MCP server: %s", exc)
+            self._running = False
+            return False
+
+    async def stop(self) -> None:
+        """Gracefully stop the MCP server."""
+        if not self._process or self._process.returncode is not None:
+            self._running = False
+            return
+
+        pid = self._process.pid
+        logger.info("Stopping MCP server (pid=%s)", pid)
+
+        try:
+            self._process.send_signal(signal.SIGTERM)
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                logger.warning("MCP server did not stop in 10s, killing")
+                self._process.kill()
+                await self._process.wait()
+        except ProcessLookupError:
+            pass
+
+        self._running = False
+        logger.info("MCP server stopped")
+
+    async def restart(self) -> bool:
+        """Stop then start the MCP server.  Returns True if restarted."""
+        await self.stop()
+        self._restart_count += 1
+        return await self.start()
+
+    # ------------------------------------------------------------------
+    # Status
+    # ------------------------------------------------------------------
+
+    async def status(self) -> dict[str, Any]:
+        """Return current process status."""
+        store = get_config_store()
+        mcp_cfg = await store.get("mcp_server", {})
+
+        if self._process and self._process.returncode is None:
+            return {
+                "running": True,
+                "pid": self._process.pid,
+                "restart_count": self._restart_count,
+                "command": mcp_cfg.get("command", ""),
+                "port": mcp_cfg.get("port", 8000),
+            }
+        return {
+            "running": False,
+            "pid": None,
+            "restart_count": self._restart_count,
+            "command": mcp_cfg.get("command", ""),
+            "port": mcp_cfg.get("port", 8000),
+            "exit_code": self._process.returncode if self._process else None,
+        }
+
+    @property
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.returncode is None
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _run_patch(script: Path, label: str) -> None:
+        """Run a patch script if it exists.  Logs output and errors."""
+        if not script.exists():
+            return
+        try:
+            result = subprocess.run(
+                ["python3", str(script)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            for line in (result.stdout or "").splitlines():
+                logger.info(line)
+            if result.returncode != 0:
+                logger.warning("Patch %s failed: %s", label, result.stderr)
+        except Exception as exc:
+            logger.warning("Could not apply patch %s: %s", label, exc)
+
+    async def _drain_logs(self) -> None:
+        """Read stdout/stderr from the subprocess and log it."""
+        if not self._process or not self._process.stdout:
+            return
+        try:
+            async for line in self._process.stdout:
+                text = line.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    logger.info("[mcp-server] %s", text)
+        except Exception:
+            pass
+
+        # Process exited
+        if self._process:
+            rc = self._process.returncode
+            self._running = False
+            logger.warning("MCP server exited with code %s", rc)
+
+
+# ------------------------------------------------------------------
+# Singleton
+# ------------------------------------------------------------------
+
+_instance: McpProcessManager | None = None
+
+
+def get_process_manager() -> McpProcessManager:
+    """Return the global McpProcessManager singleton."""
+    global _instance  # noqa: PLW0603
+    if _instance is None:
+        _instance = McpProcessManager()
+    return _instance

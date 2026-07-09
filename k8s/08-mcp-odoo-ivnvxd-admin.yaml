@@ -1,0 +1,156 @@
+###############################################################################
+# ivnvxd MCP Admin: Web GUI + Built-in Proxy + Process Manager
+# Single container replacing ivnvxd + nginx sidecar
+# Serves admin GUI + MCP proxy on port 8080
+###############################################################################
+---
+# ── Secret: admin credentials ──
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mcp-odoo-ivnvxd-admin-secrets
+  namespace: lyucijyun-odoo
+  labels:
+    app.kubernetes.io/component: mcp-odoo-ivnvxd-admin
+    app.kubernetes.io/part-of: lyucijyun
+    app.kubernetes.io/managed-by: kubectl
+type: Opaque
+stringData:
+  admin-password: "woow2026"
+  odoo-api-key: "6005e495f9405937842237ce11de529cf7c813a9"
+
+---
+# ── PVC: persistent config storage ──
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mcp-odoo-ivnvxd-admin-data
+  namespace: lyucijyun-odoo
+  labels:
+    app.kubernetes.io/component: mcp-odoo-ivnvxd-admin
+    app.kubernetes.io/part-of: lyucijyun
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 100Mi
+
+---
+# ── Deployment: single container (admin GUI + proxy + MCP subprocess) ──
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-odoo-ivnvxd-admin
+  namespace: lyucijyun-odoo
+  labels:
+    app.kubernetes.io/component: mcp-odoo-ivnvxd-admin
+    app.kubernetes.io/name: mcp-odoo-ivnvxd-admin
+    app.kubernetes.io/part-of: lyucijyun
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: mcp-odoo-ivnvxd-admin
+      app.kubernetes.io/name: mcp-odoo-ivnvxd-admin
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: mcp-odoo-ivnvxd-admin
+        app.kubernetes.io/name: mcp-odoo-ivnvxd-admin
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      imagePullSecrets:
+        - name: ghcr-creds
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: admin
+          image: ghcr.io/woowtech/ivnvxd-mcp-admin:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: admin
+              protocol: TCP
+          env:
+            - name: MCP_ADMIN_CONFIG
+              value: "/data/config.json"
+            - name: ODOO_URL
+              value: "http://lyucijyun-odoo-svc:8069"
+            - name: ODOO_DB
+              value: "odoo"
+            - name: ODOO_USER
+              value: "admin"
+            - name: ODOO_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-odoo-ivnvxd-admin-secrets
+                  key: odoo-api-key
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-odoo-ivnvxd-admin-secrets
+                  key: admin-password
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: mcp-odoo-ivnvxd-admin-data
+
+---
+# ── Service: single port 8080 (admin GUI + MCP proxy) ──
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-odoo-ivnvxd-admin-svc
+  namespace: lyucijyun-odoo
+  labels:
+    app.kubernetes.io/component: mcp-odoo-ivnvxd-admin
+    app.kubernetes.io/part-of: lyucijyun
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  selector:
+    app.kubernetes.io/component: mcp-odoo-ivnvxd-admin
+    app.kubernetes.io/name: mcp-odoo-ivnvxd-admin
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: admin
+      protocol: TCP
+  type: ClusterIP

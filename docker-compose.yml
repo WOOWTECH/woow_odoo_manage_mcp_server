@@ -1,0 +1,16 @@
+services:
+  ivnvxd-mcp-admin:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - MCP_ADMIN_CONFIG=/data/config.json
+      - ODOO_URL=http://lyucijyun-odoo-svc:8069
+      - ODOO_DB=odoo
+      - ODOO_USER=admin
+      - ODOO_API_KEY=${ODOO_API_KEY:-}
+    volumes:
+      - admin-data:/data
+
+volumes:
+  admin-data:
