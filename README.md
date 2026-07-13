@@ -407,6 +407,77 @@ woow_odoo_manage_mcp_server/
 
 ---
 
+## Use Case & Permission Model
+
+### Recommended Use: Admin Management Console
+
+This bundle is designed as a **management-level console** for Odoo administrators. It ships with `ODOO_YOLO=true` and `call_model_method` enabled by default, giving full access to all Odoo models and workflow actions (confirm orders, post invoices, validate transfers, etc.).
+
+> **This bundle should only be used by administrators or accounts with full Odoo access.** It is not designed for distribution to general users with limited permissions.
+
+### Why Admin-Only?
+
+The default configuration runs in **YOLO Full Access mode**, which means:
+
+- All Odoo models are accessible (not just whitelisted ones)
+- All CRUD operations are enabled
+- `call_model_method` allows executing **any** Odoo workflow action (`action_confirm`, `action_post`, `button_validate`, etc.)
+- No Odoo module or whitelist is required
+
+This is extremely powerful for administration, but **should not be given to users who should not have full access**.
+
+### Permission Architecture
+
+```
+Admin GUI login (single password)
+    ↓
+MCP Proxy Token (single shared token)
+    ↓
+Odoo connection (single account, typically admin)
+    ↓
+YOLO=true → all models, all methods
+```
+
+Odoo's ACL system still applies to the connected account. If you connect with a limited Odoo user, that user's permissions will be enforced. However, the intended use is with an admin account for full management capability.
+
+### What This Bundle Can Do (that others can't)
+
+With `call_model_method` + YOLO mode, this is the only bundle that can:
+
+| Action | MCP Tool Call |
+|--------|--------------|
+| Confirm a sale order | `call_model_method(model="sale.order", method="action_confirm", arguments=[[order_id]])` |
+| Post an invoice | `call_model_method(model="account.move", method="action_post", arguments=[[invoice_id]])` |
+| Validate a transfer | `call_model_method(model="stock.picking", method="button_validate", arguments=[[picking_id]])` |
+| Approve a leave | `call_model_method(model="hr.leave", method="action_approve", arguments=[[leave_id]])` |
+| Mark lead as won | `call_model_method(model="crm.lead", method="action_set_won", arguments=[[lead_id]])` |
+| Cancel any document | `call_model_method(model="...", method="action_cancel", arguments=[[id]])` |
+
+### Comparison with Woow Odoo MCP Server
+
+| Aspect | [Woow Odoo MCP Server](https://github.com/WOOWTECH/woow_odoo_mcp_server) (A款) | **This Bundle (B款)** |
+|--------|-------------------|-------------------|
+| **Best for** | Multi-user application server | **Admin management console** |
+| **Permission model** | Odoo account ACL (per-user) | YOLO=true (full access, admin only) |
+| **Tools** | 39 tools with per-tool toggle | **10 tools with master toggle** |
+| **Workflow actions** | Via `execute_method` | Via `call_model_method` |
+| **Write safety** | 3-step approval | **Direct CRUD** |
+| **Smart fields** | No | **Yes (auto-selects common fields)** |
+| **Response quality** | Bare IDs for writes | **Rich: record + URL + confirmation message** |
+| **Connection auth** | Username + Password | **API Key or Password + YOLO mode selector** |
+| **Default mode** | Needs manual config | **Ready out of the box (YOLO=true)** |
+
+### Recommended Setup: Use Both
+
+| Role | Bundle | Odoo Account |
+|------|--------|-------------|
+| **Administrators** | This bundle (B款) — YOLO full access, workflow actions | admin |
+| **Sales team** | [A款](https://github.com/WOOWTECH/woow_odoo_mcp_server) — 39 tools, per-tool control | sales_user (limited) |
+| **Accountants** | [A款](https://github.com/WOOWTECH/woow_odoo_mcp_server) — read-only tools enabled | accountant (limited) |
+| **Read-only viewers** | [A款](https://github.com/WOOWTECH/woow_odoo_mcp_server) — only Read & Discover tools | viewer (minimal) |
+
+---
+
 ## Comparison
 
 | Feature | ivnvxd + nginx sidecar | **ivnvxd MCP Admin** |
