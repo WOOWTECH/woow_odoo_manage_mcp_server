@@ -35,16 +35,22 @@ _DEFAULT_CONFIG_PATH = "/data/config.json"
 _DEFAULT_CONFIG: dict[str, Any] = {
     "admin_password": "admin",
     "mcp_auth_token": "",
-    "connection": {},
+    "connection": {
+        "odoo_yolo": "true",
+    },
     "tools": {
         "disabled": [],
         "disabled_operations": {},
     },
     "mcp_server": {
-        "command": "",
-        "args": [],
+        "command": "mcp-server-odoo",
+        "args": ["--transport", "streamable-http", "--host", "127.0.0.1", "--port", "8000"],
         "port": 8000,
-        "env": {},
+        "env": {
+            "ODOO_MCP_ALLOWED_HOSTS": "127.0.0.1,localhost",
+            "ODOO_MCP_ENABLE_METHOD_CALLS": "true",
+            "ODOO_YOLO": "true",
+        },
     },
     "proxy": {
         "timeout": 86400,
