@@ -1,0 +1,20 @@
+{{- /*
+/data/config.json: the admin password, the MCP token, the tool toggles and the
+token history. The keep policy means `helm uninstall` leaves it behind.
+*/ -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "odooManageMcp.name" . }}-data
+  namespace: {{ include "odooManageMcp.ns" . }}
+  labels:
+    {{- include "odooManageMcp.labels" . | nindent 4 }}
+  {{- include "odooManageMcp.keepAnnotations" . | nindent 2 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.persistence.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}

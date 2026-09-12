@@ -1,0 +1,17 @@
+# Instance values reproducing the legacy k8s/08-mcp-odoo-ivnvxd-admin.yaml
+# (namespace lyucijyun-odoo). No secret material: odoo-api-key and
+# admin-password live in the Secret, see secrets.example.yaml.
+#
+#   helm install mcp-odoo-admin charts/odoo-manage-mcp \
+#     -n lyucijyun-odoo --create-namespace \
+#     -f charts/odoo-manage-mcp/examples/values.lyucijyun-odoo.yaml
+#
+# tests/golden/odoo-manage-mcp.lyucijyun-odoo.yaml is the render of exactly this
+# file; scripts/check-render.sh compares the two.
+instance:
+  partOf: lyucijyun
+
+odoo:
+  url: http://lyucijyun-odoo-svc:8069
+  db: odoo
+  user: admin

@@ -1,0 +1,28 @@
+ivnvxd MCP Admin ({{ .Chart.AppVersion }}) - release {{ .Release.Name }}
+Namespace: {{ include "odooManageMcp.ns" . }}   Odoo: {{ include "odooManageMcp.odooUrl" . }}
+{{- if not .Values.secrets.create }}
+
+Secret "{{ .Values.secrets.name }}" is NOT managed by this release
+(secrets.create=false). It must already exist with keys odoo-api-key and
+admin-password: see examples/secrets.example.yaml.
+{{- end }}
+
+Wait for the pod:
+  kubectl -n {{ include "odooManageMcp.ns" . }} rollout status deploy/{{ include "odooManageMcp.name" . }} --timeout=10m
+
+Verify:
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+Reach the console (no Ingress and no tunnel ship with this chart):
+  kubectl -n {{ include "odooManageMcp.ns" . }} port-forward svc/{{ include "odooManageMcp.name" . }}-svc 8080:{{ .Values.service.port }}
+{{- if not .Values.seedConfig.enabled }}
+
+The GUI password on a fresh volume is the application default "admin"
+(mcp_admin_core/config/store.py) - the container does not read ADMIN_PASSWORD.
+Change it on the Settings page immediately, or install with
+seedConfig.enabled=true to seed it from the Secret instead.
+{{- end }}
+
+Do NOT expose port 8080 publicly without changing that password: the admin GUI
+and the MCP proxy share it, and GET /api/settings/connection returns the Odoo
+credentials in plaintext to any logged-in caller.

@@ -1,0 +1,200 @@
+{{- /*
+Single container: FastAPI admin API + React SPA + the /private_{token}/ MCP
+reverse proxy on port 8080, with mcp-server-odoo running as a subprocess on
+127.0.0.1:8000.
+
+- Recreate strategy: the /data PVC is ReadWriteOnce.
+- The Secret is referenced, never rendered (secrets.create=false by default).
+- ODOO_* only reach the mcp-server-odoo subprocess (mcp_admin_core/process.py
+  passes os.environ through); they do not become the stored connection.
+*/ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "odooManageMcp.name" . }}
+  namespace: {{ include "odooManageMcp.ns" . }}
+  labels:
+    {{- include "odooManageMcp.labels" . | nindent 4 }}
+    app.kubernetes.io/name: {{ include "odooManageMcp.name" . }}
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "odooManageMcp.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        {{- include "odooManageMcp.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and .Values.image.pullSecrets (not .Values.buildFromSource.enabled) }}
+      imagePullSecrets:
+        {{- toYaml .Values.image.pullSecrets | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: 30
+      {{- if or .Values.buildFromSource.enabled .Values.seedConfig.enabled }}
+      initContainers:
+        {{- if .Values.buildFromSource.enabled }}
+        - name: git-clone
+          image: {{ .Values.buildFromSource.images.git }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eux
+              rm -rf /repo/* /repo/.git || true
+              git clone --depth 1 --branch {{ .Values.buildFromSource.gitRef }} {{ .Values.buildFromSource.gitRepo }} /repo
+          volumeMounts:
+            - name: repo
+              mountPath: /repo
+          resources: {}
+        - name: spa-build
+          image: {{ .Values.buildFromSource.images.node }}
+          imagePullPolicy: IfNotPresent
+          workingDir: /repo/frontend
+          command:
+            - sh
+            - -c
+            - |
+              set -x
+              # Same fallback as the Woow_k3s_litellm console: a failed SPA build
+              # must not block the admin API and the MCP proxy.
+              npm install --no-audit --no-fund && npm run build \
+                && mkdir -p /repo/static && cp -r dist/* /repo/static/ \
+                || echo "SPA build failed - admin API + proxy will still run"
+              exit 0
+          volumeMounts:
+            - name: repo
+              mountPath: /repo
+          resources: {}
+        {{- end }}
+        {{- if .Values.seedConfig.enabled }}
+        - name: seed-config
+          image: {{ include "odooManageMcp.image" . }}
+          imagePullPolicy: {{ if .Values.buildFromSource.enabled }}IfNotPresent{{ else }}{{ .Values.image.pullPolicy }}{{ end }}
+          command:
+            - python
+            - -c
+            - |
+              import json, os, pathlib
+              p = pathlib.Path(os.environ.get("MCP_ADMIN_CONFIG", "/data/config.json"))
+              cfg = json.loads(p.read_text()) if p.exists() else {}
+              # setdefault, NOT assignment: the Settings page can change the
+              # admin password at runtime, and an assignment here would silently
+              # revert it to the Secret on every pod restart. The Secret seeds
+              # the FIRST boot; after that /data/config.json is the truth.
+              cfg.setdefault("admin_password", os.environ["ADMIN_PASSWORD"])
+              p.parent.mkdir(parents=True, exist_ok=True)
+              p.write_text(json.dumps(cfg, indent=2))
+              os.chmod(p, 0o600)
+              print("seeded", p)
+          env:
+            - name: MCP_ADMIN_CONFIG
+              value: "/data/config.json"
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: admin-password
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources: {}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: admin
+          image: {{ include "odooManageMcp.image" . }}
+          imagePullPolicy: {{ if .Values.buildFromSource.enabled }}IfNotPresent{{ else }}{{ .Values.image.pullPolicy }}{{ end }}
+          {{- if .Values.buildFromSource.enabled }}
+          workingDir: /repo
+          command:
+            - sh
+            - -c
+            - |
+              set -eux
+              pip install --no-cache-dir mcp-server-odoo .
+              exec uvicorn ivnvxd_mcp_admin.main:app --host 0.0.0.0 --port 8080
+          {{- end }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - containerPort: 8080
+              name: admin
+              protocol: TCP
+          env:
+            - name: MCP_ADMIN_CONFIG
+              value: "/data/config.json"
+            {{- if .Values.buildFromSource.enabled }}
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            {{- end }}
+            - name: ODOO_URL
+              value: {{ include "odooManageMcp.odooUrl" . | quote }}
+            - name: ODOO_DB
+              value: {{ .Values.odoo.db | quote }}
+            - name: ODOO_USER
+              value: {{ .Values.odoo.user | quote }}
+            - name: ODOO_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: odoo-api-key
+            # The application never reads ADMIN_PASSWORD (see values.yaml
+            # seedConfig): kept for parity with the legacy manifest.
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: admin-password
+            {{- if .Values.seedConfig.jwtSecret }}
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: jwt-secret
+            {{- end }}
+          volumeMounts:
+            {{- if .Values.buildFromSource.enabled }}
+            - name: repo
+              mountPath: /repo
+            {{- end }}
+            - name: data
+              mountPath: /data
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            {{- toYaml .Values.probes.startup | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            {{- toYaml .Values.probes.liveness | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            {{- toYaml .Values.probes.readiness | nindent 12 }}
+      volumes:
+        {{- if .Values.buildFromSource.enabled }}
+        - name: repo
+          emptyDir: {}
+        {{- end }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "odooManageMcp.name" . }}-data

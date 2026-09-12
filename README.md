@@ -276,22 +276,169 @@ ODOO_API_KEY=your_key docker compose up -d
 
 ## Deployment
 
-### Kubernetes / K3s
+### Kubernetes / K3s (Helm)
+
+The chart lives in `charts/odoo-manage-mcp/`. One release per Odoo instance, each
+in its own namespace. It replaces the former `k8s/08-mcp-odoo-ivnvxd-admin.yaml`
+and renders the same objects field for field, with the credentials moved out of
+the repository and into a Kubernetes Secret.
+
+#### 1. Create the Secret
+
+Copy `charts/odoo-manage-mcp/examples/secrets.example.yaml` **outside** the repo,
+replace every `REPLACE_ME`, then apply the copy:
 
 ```bash
-# 1. Create image pull secret (for private GHCR)
+kubectl apply -f /secure/path/secrets.yaml
+```
+
+Keys: `odoo-api-key` (required), `admin-password` (used with
+`seedConfig.enabled=true`), `jwt-secret` (used with `seedConfig.jwtSecret=true`).
+The chart only references this Secret; `secrets.create=false` is the default, so
+`helm upgrade` can never overwrite a rotated key.
+
+#### 2. Create the image pull Secret
+
+```bash
 kubectl create secret docker-registry ghcr-creds \
   --docker-server=ghcr.io \
   --docker-username=YOUR_GITHUB_USER \
   --docker-password=YOUR_GITHUB_TOKEN \
   -n your-odoo-ns
-
-# 2. Apply manifests
-kubectl apply -f k8s/08-mcp-odoo-ivnvxd-admin.yaml
-
-# 3. Verify
-kubectl get pods -n your-odoo-ns -l app.kubernetes.io/component=mcp-odoo-ivnvxd-admin
 ```
+
+Both Secrets must be in the **same namespace as the release** — the mismatch in
+the old instructions (`-n your-odoo-ns` against a manifest hardcoded to another
+namespace) was what produced `ImagePullBackOff`.
+
+#### 3. Install
+
+From a clone:
+
+```bash
+git clone https://github.com/WOOWTECH/woow_odoo_manage_mcp_server.git
+cd woow_odoo_manage_mcp_server
+
+helm install mcp-odoo-admin charts/odoo-manage-mcp \
+  -n your-odoo-ns --create-namespace \
+  --set instance.partOf=your-instance \
+  --set odoo.url=http://your-odoo-svc:8069 \
+  --set persistence.storageClassName=longhorn-delete
+```
+
+From the GitHub tarball (the chart is in a subdirectory, so extract first):
+
+```bash
+curl -sL https://github.com/WOOWTECH/woow_odoo_manage_mcp_server/archive/refs/heads/main.tar.gz | tar xz
+
+helm install mcp-odoo-admin \
+  woow_odoo_manage_mcp_server-main/charts/odoo-manage-mcp \
+  -n your-odoo-ns --create-namespace \
+  --set instance.partOf=your-instance \
+  --set odoo.url=http://your-odoo-svc:8069
+```
+
+An instance file is cleaner than a pile of `--set`; see
+`charts/odoo-manage-mcp/examples/values.lyucijyun-odoo.yaml`.
+
+#### 4. Verify
+
+```bash
+kubectl -n your-odoo-ns rollout status deploy/mcp-odoo-ivnvxd-admin --timeout=10m
+helm test mcp-odoo-admin -n your-odoo-ns --logs
+```
+
+The smoke pod is read-only: `/healthz`, the admin SPA, a rejected bad login, and
+(with `seedConfig.enabled=true`) a successful login with the password from the
+Secret.
+
+#### 5. Uninstall — data is kept
+
+```bash
+helm uninstall mcp-odoo-admin -n your-odoo-ns
+```
+
+`keepOnUninstall: true` (the default) puts `helm.sh/resource-policy: keep` on the
+PVC, the Namespace and any chart-created Secret, so `/data/config.json` — the
+admin password, the MCP token, the tool toggles and the token history — survives.
+Deleting it is a deliberate `kubectl delete pvc mcp-odoo-ivnvxd-admin-data`.
+
+#### Key values
+
+| Value | Default | Notes |
+|-------|---------|-------|
+| `instance.partOf` | *(required)* | Instance slug, used as `app.kubernetes.io/part-of` |
+| `odoo.url` | *(required)* | In-cluster Odoo URL, e.g. `http://acme-odoo-svc:8069` |
+| `odoo.db` / `odoo.user` | `odoo` / `admin` | Passed to the `mcp-server-odoo` subprocess |
+| `secrets.create` | `false` | `true` renders the Secret from values (fresh installs, tests) |
+| `secrets.name` | `mcp-odoo-ivnvxd-admin-secrets` | Existing Secret with `odoo-api-key`, `admin-password` |
+| `keepOnUninstall` | `true` | `helm.sh/resource-policy: keep` on the PVC, Namespace, Secret |
+| `persistence.storageClassName` | `""` (cluster default) | **Set explicitly on woow-k3s**: it has two default classes |
+| `image.repository` / `tag` | `ghcr.io/woowtech/ivnvxd-mcp-admin` / `latest` | Private; needs `image.pullSecrets` |
+| `seedConfig.enabled` | `false` | Seed `admin-password` from the Secret on first boot (see below) |
+| `seedConfig.jwtSecret` | `false` | Seed `JWT_SECRET`, so logins survive a pod restart |
+| `buildFromSource.enabled` | `false` | Build this repo at pod start instead of pulling the image |
+| `nodeSelector` | control-plane | Set to `{}` to let the scheduler choose |
+| `tests.enabled` | `true` | Render the `helm test` smoke pod |
+
+#### The admin password, and `seedConfig`
+
+The application never reads `ADMIN_PASSWORD` (`mcp_admin_core/auth/middleware.py`
+reads only `JWT_SECRET` and `JWT_EXPIRY_HOURS`). On a fresh volume the GUI
+password is therefore the built-in default `admin` from
+`mcp_admin_core/config/store.py`, whatever the Secret says. Two ways out:
+
+- change it on the Settings page immediately after the first login, or
+- install with `--set seedConfig.enabled=true`: an init container writes
+  `admin-password` from the Secret into `/data/config.json` with `setdefault`, so
+  it seeds the **first** boot only and never reverts a password you change later
+  in the GUI.
+
+`seedConfig` is off by default because it adds an init container, i.e. it changes
+the pod template.
+
+#### Installing without registry credentials
+
+`--set buildFromSource.enabled=true` (or
+`-f charts/odoo-manage-mcp/examples/values.build-from-source.yaml`) skips the
+private image: init containers clone this repository and build the SPA, and the
+main container runs `pip install mcp-server-odoo .` before `uvicorn` — the same
+runtime model the `Woow_k3s_litellm` MCP console uses. Only public images are
+pulled. This is how the chart's acceptance test runs.
+
+#### Taking over an instance already deployed with `kubectl apply`
+
+The chart renders the legacy objects field for field, so the pod template is
+unchanged and an adoption restarts nothing:
+
+```bash
+# 1. Confirm no drift first
+scripts/check-render.sh
+
+# 2. Adopt the existing objects
+helm upgrade --install mcp-odoo-admin charts/odoo-manage-mcp \
+  -n your-odoo-ns --take-ownership \
+  -f charts/odoo-manage-mcp/examples/values.lyucijyun-odoo.yaml
+```
+
+Keep `secrets.create=false` so the existing Secret is left untouched, and do not
+enable `seedConfig` or `containerSecurityContext` during the takeover: both
+change the pod template and would roll the pod.
+
+#### Follow-ups (not changed in this migration)
+
+- **Rotate the credentials.** The Odoo API key and the admin password were
+  committed in plaintext in `k8s/08-mcp-odoo-ivnvxd-admin.yaml` from 2026-07-09.
+  They are gone from `HEAD` but remain in the git history of this public
+  repository. Rotate the Odoo API key and the GUI password.
+- `image: latest` + `imagePullPolicy: Always`, and `pip install mcp-server-odoo`
+  is unpinned in the `Dockerfile`: a restart can silently change behaviour.
+- The container runs as root (no `USER` in the `Dockerfile`), so
+  `containerSecurityContext` stays empty; hardening it needs an image rebuild.
+- `/healthz` reports only the FastAPI app, not the `mcp-server-odoo` subprocess:
+  the proxy can return 502 while all three probes stay green.
+- No NetworkPolicy ships with the chart.
+
 
 ### Cloudflare Tunnel
 
@@ -387,7 +534,12 @@ woow_odoo_manage_mcp_server/
   frontend/                       # React 19 + Tailwind 4 + Vite 6
     src/pages/                    # 8 page components
     src/components/               # Sidebar, StatusCard
-  k8s/                            # Kubernetes manifests
+  charts/odoo-manage-mcp/         # Helm chart (replaces the old k8s/ manifest)
+    values.yaml                   # Every knob, with the deployed defaults
+    templates/                    # PVC, Deployment, Service, Secret, helm test
+    examples/                     # secrets.example.yaml + instance values
+  tests/golden/                   # Expected render, diffed by scripts/check-render.sh
+  scripts/                        # check-render.sh, check-drift.sh
   Dockerfile                      # Multi-stage build
   docker-compose.yml              # Local development
   pyproject.toml                  # Python package config

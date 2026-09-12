@@ -248,22 +248,161 @@ ODOO_API_KEY=your_key docker compose up -d
 
 ## 部署方式
 
-### Kubernetes / K3s
+### Kubernetes / K3s（Helm）
+
+Chart 放在 `charts/odoo-manage-mcp/`，每個 Odoo 站台一個 release、各自一個
+namespace。它取代原本的 `k8s/08-mcp-odoo-ivnvxd-admin.yaml`，render 出來的物件
+逐欄位相同，只是把憑證從 repo 搬進 Kubernetes Secret。
+
+#### 1. 建立 Secret
+
+把 `charts/odoo-manage-mcp/examples/secrets.example.yaml` 複製到 repo **外面**，
+換掉每一個 `REPLACE_ME`，再套用副本：
 
 ```bash
-# 1. 建立映像拉取密鑰
+kubectl apply -f /secure/path/secrets.yaml
+```
+
+欄位：`odoo-api-key`（必要）、`admin-password`（搭配 `seedConfig.enabled=true`
+才有作用）、`jwt-secret`（搭配 `seedConfig.jwtSecret=true`）。Chart 只會引用這個
+Secret，預設 `secrets.create=false`，所以 `helm upgrade` 不可能把輪換過的金鑰蓋掉。
+
+#### 2. 建立映像拉取密鑰
+
+```bash
 kubectl create secret docker-registry ghcr-creds \
   --docker-server=ghcr.io \
   --docker-username=YOUR_GITHUB_USER \
   --docker-password=YOUR_GITHUB_TOKEN \
   -n your-odoo-ns
-
-# 2. 套用資源清單
-kubectl apply -f k8s/08-mcp-odoo-ivnvxd-admin.yaml
-
-# 3. 驗證
-kubectl get pods -n your-odoo-ns -l app.kubernetes.io/component=mcp-odoo-ivnvxd-admin
 ```
+
+兩個 Secret 都必須和 release 在**同一個 namespace**。舊說明叫你用
+`-n your-odoo-ns`，manifest 裡的 namespace 卻是寫死的另一個，這正是
+`ImagePullBackOff` 的來源。
+
+#### 3. 安裝
+
+Clone 之後安裝：
+
+```bash
+git clone https://github.com/WOOWTECH/woow_odoo_manage_mcp_server.git
+cd woow_odoo_manage_mcp_server
+
+helm install mcp-odoo-admin charts/odoo-manage-mcp \
+  -n your-odoo-ns --create-namespace \
+  --set instance.partOf=your-instance \
+  --set odoo.url=http://your-odoo-svc:8069 \
+  --set persistence.storageClassName=longhorn-delete
+```
+
+用 GitHub tarball（chart 在子目錄，所以要先解壓）：
+
+```bash
+curl -sL https://github.com/WOOWTECH/woow_odoo_manage_mcp_server/archive/refs/heads/main.tar.gz | tar xz
+
+helm install mcp-odoo-admin \
+  woow_odoo_manage_mcp_server-main/charts/odoo-manage-mcp \
+  -n your-odoo-ns --create-namespace \
+  --set instance.partOf=your-instance \
+  --set odoo.url=http://your-odoo-svc:8069
+```
+
+與其堆一長串 `--set`，不如寫成 instance values 檔，範例見
+`charts/odoo-manage-mcp/examples/values.lyucijyun-odoo.yaml`。
+
+#### 4. 驗證
+
+```bash
+kubectl -n your-odoo-ns rollout status deploy/mcp-odoo-ivnvxd-admin --timeout=10m
+helm test mcp-odoo-admin -n your-odoo-ns --logs
+```
+
+Smoke pod 全部是唯讀檢查：`/healthz`、管理 SPA、錯誤密碼要被擋下來，以及
+（`seedConfig.enabled=true` 時）用 Secret 裡的密碼登入成功。
+
+#### 5. 解除安裝 — 資料會留下
+
+```bash
+helm uninstall mcp-odoo-admin -n your-odoo-ns
+```
+
+預設 `keepOnUninstall: true`，會在 PVC、Namespace 和 chart 建立的 Secret 上加
+`helm.sh/resource-policy: keep`，所以 `/data/config.json`（管理密碼、MCP token、
+工具開關、token 歷史）不會被刪。要刪得自己明確執行
+`kubectl delete pvc mcp-odoo-ivnvxd-admin-data`。
+
+#### 主要 values
+
+| Value | 預設 | 說明 |
+|-------|------|------|
+| `instance.partOf` | *(必填)* | 站台代號，會成為 `app.kubernetes.io/part-of` |
+| `odoo.url` | *(必填)* | 叢集內 Odoo 位址，例如 `http://acme-odoo-svc:8069` |
+| `odoo.db` / `odoo.user` | `odoo` / `admin` | 傳給 `mcp-server-odoo` 子行程 |
+| `secrets.create` | `false` | `true` 時由 values 產生 Secret（全新安裝、測試用） |
+| `secrets.name` | `mcp-odoo-ivnvxd-admin-secrets` | 既有 Secret，需有 `odoo-api-key`、`admin-password` |
+| `keepOnUninstall` | `true` | 在 PVC、Namespace、Secret 上加 keep 註記 |
+| `persistence.storageClassName` | `""`（叢集預設） | **woow-k3s 上務必指定**：那裡有兩個 default StorageClass |
+| `image.repository` / `tag` | `ghcr.io/woowtech/ivnvxd-mcp-admin` / `latest` | 私有映像，需要 `image.pullSecrets` |
+| `seedConfig.enabled` | `false` | 首次開機時用 Secret 的 `admin-password` 種入設定（見下） |
+| `seedConfig.jwtSecret` | `false` | 種入 `JWT_SECRET`，讓登入狀態撐得過 Pod 重啟 |
+| `buildFromSource.enabled` | `false` | 不拉映像，改在 Pod 啟動時建置本 repo |
+| `nodeSelector` | control-plane | 設成 `{}` 交給排程器決定 |
+| `tests.enabled` | `true` | 是否 render `helm test` smoke pod |
+
+#### 管理密碼與 `seedConfig`
+
+程式碼從來不讀 `ADMIN_PASSWORD`（`mcp_admin_core/auth/middleware.py` 只讀
+`JWT_SECRET` 和 `JWT_EXPIRY_HOURS`）。所以在全新的 volume 上，GUI 密碼一定是
+`mcp_admin_core/config/store.py` 裡寫死的預設值 `admin`，不管 Secret 寫什麼。
+兩個解法：
+
+- 第一次登入後立刻到 Settings 頁改掉；或
+- 安裝時加 `--set seedConfig.enabled=true`：init container 會用 `setdefault` 把
+  Secret 的 `admin-password` 寫進 `/data/config.json`，只種**第一次**開機，之後在
+  GUI 改過的密碼不會被還原。
+
+`seedConfig` 預設關閉，因為它會多一個 init container，也就是會動到 pod template。
+
+#### 沒有 registry 憑證時的安裝方式
+
+加 `--set buildFromSource.enabled=true`（或
+`-f charts/odoo-manage-mcp/examples/values.build-from-source.yaml`）就完全不碰私有
+映像：init container 會 clone 本 repo 並建置 SPA，主容器先跑
+`pip install mcp-server-odoo .` 再啟動 `uvicorn`，和 `Woow_k3s_litellm` 的 MCP
+console 是同一套執行模式，只會拉公開映像。這個 chart 的驗收測試就是這樣跑的。
+
+#### 接管既有的 `kubectl apply` 部署
+
+Chart render 出來的物件和舊 manifest 逐欄位相同，pod template 沒變，所以接管不會
+重啟任何東西：
+
+```bash
+# 1. 先確認沒有 drift
+scripts/check-render.sh
+
+# 2. 接管既有物件
+helm upgrade --install mcp-odoo-admin charts/odoo-manage-mcp \
+  -n your-odoo-ns --take-ownership \
+  -f charts/odoo-manage-mcp/examples/values.lyucijyun-odoo.yaml
+```
+
+`secrets.create` 保持 `false`，既有 Secret 才不會被動到；接管當下也不要打開
+`seedConfig` 或 `containerSecurityContext`，這兩個都會改到 pod template，會讓 Pod 重啟。
+
+#### 後續待辦（這次遷移沒有處理）
+
+- **輪換憑證。** Odoo API key 和管理密碼從 2026-07-09 起就以明文寫在
+  `k8s/08-mcp-odoo-ivnvxd-admin.yaml` 裡，而本 repo 是公開的。它們已從 `HEAD`
+  移除，但 git 歷史還在，所以 Odoo API key 和 GUI 密碼都必須輪換。
+- 映像用 `latest` 加 `imagePullPolicy: Always`，`Dockerfile` 的
+  `pip install mcp-server-odoo` 也沒鎖版本：重啟就可能換到不同行為。
+- 容器以 root 執行（`Dockerfile` 沒有 `USER`），所以 `containerSecurityContext`
+  維持空值；要加固得先重建映像。
+- `/healthz` 只反映 FastAPI 本身，不看 `mcp-server-odoo` 子行程：代理回 502 時，
+  三個 probe 仍然是綠的。
+- Chart 不含 NetworkPolicy。
+
 
 ### Cloudflare Tunnel
 
@@ -348,7 +487,12 @@ woow_odoo_manage_mcp_server/
   frontend/                       # React 19 + Tailwind 4 + Vite 6
     src/pages/                    # 8 個頁面元件
     src/components/               # Sidebar、StatusCard
-  k8s/                            # Kubernetes 資源清單
+  charts/odoo-manage-mcp/         # Helm chart（取代原本的 k8s/ 資源清單）
+    values.yaml                   # 所有設定項，預設值等同原本部署
+    templates/                    # PVC、Deployment、Service、Secret、helm test
+    examples/                     # secrets.example.yaml 與 instance values
+  tests/golden/                   # 預期 render 結果，由 scripts/check-render.sh 比對
+  scripts/                        # check-render.sh、check-drift.sh
   Dockerfile                      # 多階段建置
   docker-compose.yml              # 本地開發
   pyproject.toml                  # Python 套件設定

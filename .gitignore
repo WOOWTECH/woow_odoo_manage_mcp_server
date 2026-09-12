@@ -8,3 +8,21 @@ dist/
 build/
 .vite/
 frontend/dist/
+
+# Real secrets must never be committed - only
+# charts/odoo-manage-mcp/examples/secrets.example.yaml, which holds placeholders.
+# The patterns are anchored to the repo root (leading /) on purpose: an
+# unanchored "secrets.yaml" also matches
+# charts/odoo-manage-mcp/templates/secrets.yaml and would silently keep the
+# chart's own Secret template out of git.
+.env.*
+*.env
+/secrets.yaml
+/*-secrets.yaml
+/*.secret.yaml
+/*secrets.values.yaml
+/*.local.yaml
+!/charts/odoo-manage-mcp/templates/secrets.yaml
+
+# Packaged charts
+*.tgz

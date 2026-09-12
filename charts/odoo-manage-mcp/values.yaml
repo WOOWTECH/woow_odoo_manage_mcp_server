@@ -1,0 +1,147 @@
+# Default values for the odoo-manage-mcp chart.
+#
+# The defaults reproduce the legacy k8s/08-mcp-odoo-ivnvxd-admin.yaml object for
+# object, with one deliberate change: the Odoo API key and the admin password are
+# NOT part of the chart. They live in a Kubernetes Secret that is created out of
+# band from examples/secrets.example.yaml (secrets.create=false), so no credential
+# is ever committed to this repository again.
+#
+# One release per Odoo instance, each in its own namespace.
+
+namespace:
+  # Render a Namespace object. A namespace equal to the release namespace (`-n`)
+  # is never rendered - create it with --create-namespace instead - so
+  # `helm uninstall` can never delete the namespace the release lives in.
+  create: false
+  # "" = the release namespace (`-n`).
+  name: ""
+
+# Add `helm.sh/resource-policy: keep` to the Namespace, the PVC and chart-created
+# Secrets, so `helm uninstall` never deletes /data/config.json (the admin
+# password, the MCP token and every tool toggle live there, not in the Secret).
+keepOnUninstall: true
+
+instance:
+  # REQUIRED. Value of app.kubernetes.io/part-of on every object: the customer
+  # or instance slug, e.g. "lyucijyun" for namespace lyucijyun-odoo.
+  partOf: ""
+
+odoo:
+  # REQUIRED. In-cluster URL of the Odoo this MCP server manages,
+  # e.g. http://lyucijyun-odoo-svc:8069
+  url: ""
+  db: odoo
+  user: admin
+
+image:
+  repository: ghcr.io/woowtech/ivnvxd-mcp-admin
+  tag: latest
+  pullPolicy: Always
+  # The image is private; the pull Secret must already exist in the namespace:
+  #   kubectl create secret docker-registry ghcr-creds \
+  #     --docker-server=ghcr.io --docker-username=USER --docker-password=TOKEN \
+  #     -n <namespace>
+  pullSecrets:
+    - name: ghcr-creds
+
+secrets:
+  # false (default): the Secret already exists (created from
+  #   examples/secrets.example.yaml) and the chart never renders it, so an
+  #   upgrade can never overwrite a rotated key with an empty value.
+  # true: render the Secret from the values below (fresh installs, tests).
+  create: false
+  # Name of the Secret holding admin-password and odoo-api-key.
+  name: mcp-odoo-ivnvxd-admin-secrets
+  # Odoo API key (Standard mode) or the Odoo password (YOLO mode).
+  odooApiKey: ""
+  # Seed for the admin GUI password. Only takes effect with seedConfig.enabled=true
+  # (see below): the application itself never reads ADMIN_PASSWORD.
+  adminPassword: ""
+  # JWT signing secret. Only used with seedConfig.jwtSecret=true.
+  jwtSecret: ""
+
+# Persistent /data/config.json: admin password, MCP token, tool toggles.
+persistence:
+  # "" = the cluster default StorageClass. woow-k3s has TWO default classes
+  # (local-path/Delete and longhorn/Retain), so set this explicitly there,
+  # e.g. longhorn-delete.
+  storageClassName: ""
+  size: 100Mi
+
+# The legacy manifest pins the pod to a control-plane node. Set to {} to let the
+# scheduler choose.
+nodeSelector:
+  node-role.kubernetes.io/control-plane: "true"
+
+podSecurityContext:
+  fsGroup: 1000
+
+# Container-level hardening. OFF by default: it is a pod-template change, and the
+# image runs as root (the Dockerfile has no USER), so enabling it without
+# rebuilding the image would crash-loop the container. See README "Follow-ups".
+containerSecurityContext: {}
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# All three probes hit /healthz, which only reports the FastAPI app - not the
+# mcp-server-odoo subprocess. Kept as deployed; see README "Follow-ups".
+probes:
+  startup:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    failureThreshold: 30
+    timeoutSeconds: 3
+  liveness:
+    initialDelaySeconds: 15
+    periodSeconds: 30
+    timeoutSeconds: 5
+  readiness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+
+seedConfig:
+  # OFF by default: it adds an init container, i.e. it changes the pod template.
+  #
+  # Why it exists: the container reads ADMIN_PASSWORD from nowhere
+  # (mcp_admin_core/auth/middleware.py reads only JWT_SECRET and
+  # JWT_EXPIRY_HOURS), so on a fresh volume the GUI password is the hardcoded
+  # default "admin" from mcp_admin_core/config/store.py:36 - whatever the Secret
+  # says. With seedConfig.enabled=true an init container writes admin-password
+  # from the Secret into /data/config.json with setdefault, so it seeds the FIRST
+  # boot only and never reverts a password changed later in the GUI.
+  enabled: false
+  # Also seed a JWT signing secret so logins survive a pod restart. Requires a
+  # jwt-secret key in the Secret.
+  jwtSecret: false
+
+buildFromSource:
+  # OFF by default: the deployed model is the prebuilt image above.
+  #
+  # ON: skip the private registry entirely and build this repository at pod
+  # start (git clone -> npm run build -> pip install), the same runtime model the
+  # Woow_k3s_litellm MCP console uses. Only public images are needed, which makes
+  # the chart installable and testable without GHCR credentials.
+  enabled: false
+  gitRepo: https://github.com/WOOWTECH/woow_odoo_manage_mcp_server
+  gitRef: main
+  images:
+    git: alpine/git:latest
+    node: node:20-alpine
+    python: python:3.12-slim
+
+service:
+  type: ClusterIP
+  port: 8080
+
+tests:
+  # `helm test` smoke pod: /healthz, the admin SPA, and (with seedConfig.enabled)
+  # a login with the password from the Secret. Read-only.
+  enabled: true
+  image: python:3.12-slim
