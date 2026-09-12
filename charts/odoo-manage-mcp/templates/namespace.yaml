@@ -1,0 +1,16 @@
+{{- /*
+Namespace. One that equals the release namespace is skipped: Helm keeps its
+release record there, so it is created with --create-namespace instead and can
+never be deleted by `helm uninstall`.
+*/ -}}
+{{- if .Values.namespace.create }}
+{{- if ne (include "odooManageMcp.ns" .) .Release.Namespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "odooManageMcp.ns" . }}
+  labels:
+    {{- include "odooManageMcp.labels" . | nindent 4 }}
+  {{- include "odooManageMcp.keepAnnotations" . | nindent 2 }}
+{{- end }}
+{{- end }}

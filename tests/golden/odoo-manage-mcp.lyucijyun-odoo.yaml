@@ -1,0 +1,148 @@
+# GOLDEN RENDER - do not edit by hand.
+#
+# The three non-Secret objects of the legacy k8s/08-mcp-odoo-ivnvxd-admin.yaml,
+# field for field, with the intended changes of the Helm migration applied:
+#   1. the Secret object is gone: the chart references it and never renders it
+#      (secrets.create=false), and its two plaintext values are gone from HEAD
+#   2. app.kubernetes.io/managed-by: kubectl -> Helm (Deployment, Service)
+#   3. helm.sh/resource-policy: keep on the PVC (keepOnUninstall, so
+#      `helm uninstall` cannot delete /data/config.json)
+# Nothing else differs - in particular the pod template is byte-for-byte the
+# legacy one, so adopting the chart on a running instance restarts nothing.
+#
+# scripts/check-render.sh renders charts/odoo-manage-mcp with
+# examples/values.lyucijyun-odoo.yaml and diffs the result against this file, so
+# any future chart edit that would change a live object fails CI.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: mcp-odoo-ivnvxd-admin
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: mcp-odoo-ivnvxd-admin
+    app.kubernetes.io/part-of: lyucijyun
+  name: mcp-odoo-ivnvxd-admin
+  namespace: lyucijyun-odoo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: mcp-odoo-ivnvxd-admin
+      app.kubernetes.io/name: mcp-odoo-ivnvxd-admin
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: mcp-odoo-ivnvxd-admin
+        app.kubernetes.io/name: mcp-odoo-ivnvxd-admin
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: MCP_ADMIN_CONFIG
+          value: /data/config.json
+        - name: ODOO_URL
+          value: http://lyucijyun-odoo-svc:8069
+        - name: ODOO_DB
+          value: odoo
+        - name: ODOO_USER
+          value: admin
+        - name: ODOO_API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: odoo-api-key
+              name: mcp-odoo-ivnvxd-admin-secrets
+        - name: ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: admin-password
+              name: mcp-odoo-ivnvxd-admin-secrets
+        image: ghcr.io/woowtech/ivnvxd-mcp-admin:latest
+        imagePullPolicy: Always
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          timeoutSeconds: 5
+        name: admin
+        ports:
+        - containerPort: 8080
+          name: admin
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        startupProbe:
+          failureThreshold: 30
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+        volumeMounts:
+        - mountPath: /data
+          name: data
+      imagePullSecrets:
+      - name: ghcr-creds
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: 'true'
+      securityContext:
+        fsGroup: 1000
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: mcp-odoo-ivnvxd-admin-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    app.kubernetes.io/component: mcp-odoo-ivnvxd-admin
+    app.kubernetes.io/part-of: lyucijyun
+  name: mcp-odoo-ivnvxd-admin-data
+  namespace: lyucijyun-odoo
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: mcp-odoo-ivnvxd-admin
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: lyucijyun
+  name: mcp-odoo-ivnvxd-admin-svc
+  namespace: lyucijyun-odoo
+spec:
+  ports:
+  - name: admin
+    port: 8080
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    app.kubernetes.io/component: mcp-odoo-ivnvxd-admin
+    app.kubernetes.io/name: mcp-odoo-ivnvxd-admin
+  type: ClusterIP

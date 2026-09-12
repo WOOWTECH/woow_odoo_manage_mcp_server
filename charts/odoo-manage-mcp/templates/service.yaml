@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "odooManageMcp.name" . }}-svc
+  namespace: {{ include "odooManageMcp.ns" . }}
+  labels:
+    {{- include "odooManageMcp.labels" . | nindent 4 }}
+    app.kubernetes.io/managed-by: Helm
+spec:
+  selector:
+    {{- include "odooManageMcp.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: 8080
+      name: admin
+      protocol: TCP
+  type: {{ .Values.service.type }}

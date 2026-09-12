@@ -1,0 +1,22 @@
+apiVersion: v2
+name: odoo-manage-mcp
+description: >-
+  ivnvxd MCP Admin for Odoo on K3s: one container serving the admin Web GUI,
+  the built-in MCP reverse proxy and the mcp-server-odoo subprocess, with the
+  Odoo API key and the admin password kept in a Kubernetes Secret.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+kubeVersion: ">=1.27.0-0"
+keywords:
+  - mcp
+  - odoo
+  - admin
+  - proxy
+home: https://github.com/WOOWTECH/woow_odoo_manage_mcp_server
+sources:
+  - https://github.com/WOOWTECH/woow_odoo_manage_mcp_server
+  - https://github.com/ivnvxd/mcp-server-odoo
+maintainers:
+  - name: WoowTech
+    url: https://github.com/WOOWTECH

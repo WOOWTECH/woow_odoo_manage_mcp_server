@@ -1,0 +1,32 @@
+# Install without GHCR credentials: clone and build this repository at pod start
+# (git clone -> npm run build -> pip install), the runtime model the
+# Woow_k3s_litellm MCP console uses. Only public images are pulled.
+#
+# Used by the acceptance test of this chart:
+#   helm install odoo-manage-mcp charts/odoo-manage-mcp -n <test-ns> \
+#     -f charts/odoo-manage-mcp/examples/values.build-from-source.yaml \
+#     --set instance.partOf=... --set odoo.url=... \
+#     --set secrets.create=true --set secrets.odooApiKey=... --set secrets.adminPassword=...
+buildFromSource:
+  enabled: true
+
+# Seed the admin password from the Secret instead of leaving the built-in
+# default "admin".
+seedConfig:
+  enabled: true
+
+# `pip install` of mcp-server-odoo and this package happens in the container
+# command, so first boot needs a longer startup budget than a prebuilt image.
+probes:
+  startup:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 90
+    timeoutSeconds: 3
+
+persistence:
+  storageClassName: longhorn-delete
+
+# woow-k3s control-plane nodes are untainted, but a test install has no reason to
+# prefer them.
+nodeSelector: {}

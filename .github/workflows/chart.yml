@@ -1,0 +1,124 @@
+name: chart
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch: {}
+
+env:
+  CHART: charts/odoo-manage-mcp
+  VALUES: charts/odoo-manage-mcp/examples/values.lyucijyun-odoo.yaml
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.19.5
+
+      - name: helm lint
+        run: helm lint "$CHART" -f "$VALUES"
+
+      - name: helm template (every values combination)
+        run: |
+          S="secrets.create=true,secrets.odooApiKey=x,secrets.adminPassword=x,secrets.jwtSecret=x"
+          helm template mcp-odoo-admin "$CHART" -n lyucijyun-odoo -f "$VALUES" \
+            > /tmp/production.yaml
+          helm template mcp-odoo-admin "$CHART" -f "$VALUES" \
+            > /tmp/default-ns.yaml
+          helm template mcp-odoo-admin "$CHART" -n lyucijyun-odoo -f "$VALUES" \
+            --set "$S" --set seedConfig.enabled=true,seedConfig.jwtSecret=true \
+            > /tmp/secrets.yaml
+          helm template mcp-odoo-admin "$CHART" -n lyucijyun-odoo -f "$VALUES" \
+            -f "$CHART/examples/values.build-from-source.yaml" --set "$S" \
+            > /tmp/from-source.yaml
+          helm template mcp-odoo-admin "$CHART" -n test-ns -f "$VALUES" \
+            --set namespace.create=true,namespace.name=other-ns \
+            --set keepOnUninstall=false,tests.enabled=false,service.type=NodePort \
+            --set containerSecurityContext.runAsNonRoot=true \
+            --set persistence.storageClassName=longhorn-delete,nodeSelector=null \
+            > /tmp/variants.yaml
+
+      - name: kubeconform (schema validation)
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar -xz -C /usr/local/bin kubeconform
+          kubeconform -strict -summary \
+            /tmp/production.yaml /tmp/default-ns.yaml /tmp/secrets.yaml \
+            /tmp/from-source.yaml /tmp/variants.yaml
+
+      - name: Required values are enforced
+        run: |
+          if helm template mcp-odoo-admin "$CHART" > /dev/null 2>&1; then
+            echo "rendered without instance.partOf / odoo.url"; exit 1
+          fi
+          if helm template mcp-odoo-admin "$CHART" -f "$VALUES" \
+               --set secrets.create=true > /dev/null 2>&1; then
+            echo "secrets.create=true rendered without any secret value"; exit 1
+          fi
+          echo "required() guards fire"
+          # The Secret must render with secrets.create=true. This also catches
+          # templates/secrets.yaml being dropped from git by a bad .gitignore.
+          n=$(grep -c '^kind: Secret$' /tmp/secrets.yaml || true)
+          [ "$n" -eq 1 ] || { echo "expected 1 Secret with secrets.create=true, got $n"; exit 1; }
+          echo "secrets.create=true renders the Secret"
+
+      - name: Every template is present in git
+        run: |
+          # A fresh checkout (this one) must contain every template the chart
+          # needs; compare the tracked files with what helm actually renders.
+          for t in _helpers.tpl namespace.yaml secrets.yaml pvc.yaml \
+                   deployment.yaml service.yaml NOTES.txt tests/smoke.yaml; do
+            git ls-files --error-unmatch "$CHART/templates/$t" > /dev/null \
+              || { echo "missing from git: $CHART/templates/$t"; exit 1; }
+          done
+          for k in PersistentVolumeClaim Service Deployment; do
+            grep -q "^kind: $k$" /tmp/production.yaml \
+              || { echo "default render is missing kind $k"; exit 1; }
+          done
+          grep -q '^kind: Namespace$' /tmp/variants.yaml \
+            || { echo "namespace.create=true rendered no Namespace"; exit 1; }
+          grep -q '^kind: Pod$' /tmp/production.yaml \
+            || { echo "helm test pod did not render"; exit 1; }
+          echo "all templates render"
+
+      - name: No secret committed
+        run: |
+          pip install --quiet pyyaml
+          python3 - <<'EOF'
+          import pathlib, sys, yaml
+          bad = []
+          v = yaml.safe_load(open("charts/odoo-manage-mcp/values.yaml"))
+          for k, val in v["secrets"].items():
+              if k not in ("create", "name") and val:
+                  bad.append(f"values.yaml secrets.{k} must be empty")
+          for d in yaml.safe_load_all(open("/tmp/production.yaml")):
+              if d and d.get("kind") == "Secret":
+                  bad.append("default render must not contain a Secret (secrets.create=false)")
+          ex = "charts/odoo-manage-mcp/examples/secrets.example.yaml"
+          for d in yaml.safe_load_all(open(ex)):
+              for k, val in ((d or {}).get("stringData") or {}).items():
+                  if "REPLACE_ME" not in str(val):
+                      bad.append(f"{ex}: {k} is not a placeholder")
+          # The Secret that used to live in k8s/08-mcp-odoo-ivnvxd-admin.yaml must
+          # not come back anywhere in the tree.
+          for p in pathlib.Path(".").rglob("*.yaml"):
+              if ".git/" in str(p):
+                  continue
+              t = p.read_text(errors="ignore")
+              if "odoo-api-key:" in t and "REPLACE_ME" not in t and "secretKeyRef" not in t and "{{" not in t:
+                  bad.append(f"{p}: looks like a plaintext odoo-api-key")
+          sys.exit("\n".join(bad)) if bad else print("no secret committed")
+          EOF
+
+      - name: Chart still renders the legacy objects
+        run: |
+          pip install --quiet pyyaml
+          scripts/check-render.sh
+
+      - name: Shell scripts parse
+        run: bash -n scripts/*.sh
